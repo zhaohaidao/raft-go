@@ -1,7 +1,7 @@
 package raft
 
 import (
-	pb "github.com/coreos/etcd/raft/raftpb"
+	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
 )
 
 type raftLog struct {
@@ -17,4 +17,35 @@ type raftLog struct {
 	applied uint64
 
 	logger Logger
+}
+
+func (l *raftLog) appliedTo(i uint64) {
+}
+
+func (l *raftLog) lastIndex() uint64 {
+	return 0
+}
+
+func (l *raftLog) lastTerm() uint64 {
+	return 0
+}
+
+// nextEnts returns all the available entries for execution.
+// If applied is smaller than the index of snapshot, it returns all committed
+// entries after the index of snapshot.
+func (l *raftLog) nextEnts() (ents []pb.Entry) {
+	return []pb.Entry{}
+}
+
+// allEntries returns all entries in the log.
+func (l *raftLog) allEntries() []pb.Entry {
+	return []pb.Entry{}
+}
+
+func (l *raftLog) unstableEntries() []pb.Entry {
+	return []pb.Entry{}
+}
+
+func (l *raftLog) stableTo(i, t uint64) {
+
 }

@@ -2,9 +2,12 @@ package raft
 
 import (
 	"context"
-	pb "github.com/coreos/etcd/raft/raftpb"
+	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
 )
 
+var (
+	emptyState = pb.HardState{}
+)
 // Node represents a node in a raft cluster.
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
@@ -78,4 +81,8 @@ type Ready struct {
 type SoftState struct {
 	Lead      uint64 // must use atomic operations to access; keep 64-bit aligned.
 	RaftState StateType
+}
+
+func isHardStateEqual(a, b pb.HardState) bool {
+	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
 }
