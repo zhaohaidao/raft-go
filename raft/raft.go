@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"errors"
+	"math/rand"
+	"time"
+	"sync"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -29,11 +32,28 @@ var stmap = [...]string{
 	"StateLeader",
 }
 
+// lockedRand is a small wrapper around rand.Rand to provide
+// synchronization among multiple raft groups. Only the methods needed
+// by the code are exposed (e.g. Intn).
+type lockedRand struct {
+	mu   sync.Mutex
+	rand *rand.Rand
+}
+
+func (r *lockedRand) Intn(n int) int {
+	r.mu.Lock()
+	v := r.rand.Intn(n)
+	r.mu.Unlock()
+	return v
+}
+
 func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
-// TODO: config
+var globalRand = &lockedRand{
+	rand: rand.New(rand.NewSource(time.Now().UnixNano())),
+}
 
 type raft struct {
 	id uint64
@@ -59,16 +79,6 @@ type raft struct {
 
 	// the leader id
 	lead uint64
-	// leadTransferee is id of the leader transfer target when its value is not zero.
-	// Follow the procedure defined in raft thesis 3.10.
-	leadTransferee uint64
-	// Only one conf change may be pending (in the log, but not yet
-	// applied) at a time. This is enforced via pendingConfIndex, which
-	// is set to a value >= the log index of the latest pending
-	// configuration change (if any). Config changes are only allowed to
-	// be proposed if the leader's applied index is greater than this
-	// value.
-	pendingConfIndex uint64
 
 	// number of ticks since it reached last electionTimeout when it is candidate
 	// number of ticks since it reached last electionTimeout or received a
@@ -85,7 +95,6 @@ type raft struct {
 	// [electiontimeout, 2 * electiontimeout - 1]. It gets reset
 	// when raft changes its state to follower or candidate.
 	randomizedElectionTimeout int
-	disableProposalForwarding bool
 
 	tick func()
 	step stepFunc
@@ -95,6 +104,9 @@ type raft struct {
 
 // TODO: leader election
 func (r *raft) Step(m pb.Message) error {
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, None)
+	}
 	return nil
 }
 
@@ -173,20 +185,56 @@ func (c *Config) validate() error {
 	return nil
 }
 
+func (r *raft) resetRandomizedElectionTimeout() {
+	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
+}
+
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	r.Term = term
+	r.lead = lead
+
+	r.state = StateFollower
+	r.Vote = None
+	r.electionElapsed = 0
+	r.resetRandomizedElectionTimeout()
 
 }
 
 func (r *raft) becomeCandidate() {
+	r.Term += 1
+	r.state = StateCandidate
+	r.Vote = r.id
+	r.electionElapsed = 0
+	r.resetRandomizedElectionTimeout()
 
 }
 
 func (r *raft) becomeLeader() {
+	r.state = StateLeader
+	r.Vote = None
+	for _, pr := range r.prs {
+		pr.Match = 0
+		pr.Next = r.raftLog.lastIndex() + 1
+	}
 
 }
 
 func (r *raft) appendEntry(es ...pb.Entry) {
+	lastIndex := r.raftLog.lastIndex()
+	for i := range es {
+		es[i].Term = r.Term
+		es[i].Index = lastIndex + 1 + uint64(i)
+	}
+	r.raftLog.append()
 
+}
+
+// tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
+func (r *raft) tickHeartbeat() {
+	if r.state != StateLeader {
+		return
+	}
+	r.Step(pb.Message{From: r.id, Type: pb.MsgBeat})
 }
 
 // tickElection is run by followers and candidates after r.electionTimeout.
@@ -196,11 +244,6 @@ func (r *raft) tickElection() {
 
 func (r *raft) reset(term uint64) {
 
-}
-
-// newLogWithSize returns a log using the given storage
-func newLog(storage Storage, logger Logger) *raftLog {
-	return nil
 }
 
 func newRaft(c *Config) *raft {

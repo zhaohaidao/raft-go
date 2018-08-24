@@ -21,7 +21,6 @@ type Status struct {
 func getStatus(r *raft) Status {
 	s := Status{
 		ID:             r.id,
-		LeadTransferee: r.leadTransferee,
 	}
 
 	s.HardState = r.hardState()

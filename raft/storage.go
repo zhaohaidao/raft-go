@@ -16,8 +16,22 @@ package raft
 
 import (
 	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
+	"sync"
+	"errors"
 )
 
+
+// ErrCompacted is returned by Storage.Entries/Compact when a requested
+// index is unavailable because it predates the last snapshot.
+var ErrCompacted = errors.New("requested index is unavailable due to compaction")
+
+// ErrSnapOutOfDate is returned by Storage.CreateSnapshot when a requested
+// index is older than the existing snapshot.
+var ErrSnapOutOfDate = errors.New("requested index is older than the existing snapshot")
+
+// ErrUnavailable is returned by Storage interface when the requested log entries
+// are unavailable.
+var ErrUnavailable = errors.New("requested entry at index is unavailable")
 
 // Storage is an interface that may be implemented by the application
 // to retrieve log entries from storage.
@@ -47,32 +61,81 @@ type Storage interface {
 }
 
 type memoryStorage struct {
+	// Protects access to all fields. Most methods of MemoryStorage are
+	// run on the raft goroutine, but Append() is run on an application
+	// goroutine.
+	sync.Mutex
 
+	hardState pb.HardState
+	snapshot  pb.Snapshot
+	// ents[i] has raft log position i+snapshot.Metadata.Index
+	ents []pb.Entry
 }
 
-func (m *memoryStorage) InitialState() (pb.HardState, pb.ConfState, error) {
-	return pb.HardState{}, pb.ConfState{}, nil
-}
-
-func (m *memoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
-	return []pb.Entry{}, nil
-}
-
-func (m *memoryStorage) Term(i uint64) (uint64, error) {
-	return 0, nil
-}
-
-func (m *memoryStorage) LastIndex() (uint64, error)  {
-	return 0, nil
-}
-
-func (m *memoryStorage) FirstIndex() (uint64, error)  {
-	return 0, nil
-}
 
 // NewMemoryStorage creates an empty MemoryStorage.
 func NewMemoryStorage() *memoryStorage {
-	return nil
+	return &memoryStorage{
+		// When starting from scratch populate the list with a dummy entry at term zero.
+		ents: make([]pb.Entry, 1),
+	}
+}
+
+func (ms *memoryStorage) InitialState() (pb.HardState, pb.ConfState, error) {
+	return ms.hardState, ms.snapshot.Metadata.ConfState, nil
+}
+
+func (ms *memoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
+	ms.Lock()
+	defer ms.Unlock()
+	offset := ms.ents[0].Index
+	if lo <= offset {
+		return nil, ErrCompacted
+	}
+	if hi > ms.lastIndex()+1 {
+		raftLogger.Panicf("entries' hi(%d) is out of bound lastindex(%d)", hi, ms.lastIndex())
+	}
+	// only contains dummy entries.
+	if len(ms.ents) == 1 {
+		return nil, ErrUnavailable
+	}
+
+	ents := ms.ents[lo-offset : hi-offset]
+	return limitSize(ents, maxSize), nil
+
+}
+
+func (ms *memoryStorage) Term(i uint64) (uint64, error) {
+	ms.Lock()
+	defer ms.Unlock()
+	offset := ms.ents[0].Index
+	if i < offset {
+		return 0, ErrCompacted
+	}
+	if int(i-offset) >= len(ms.ents) {
+		return 0, ErrUnavailable
+	}
+	return ms.ents[i-offset].Term, nil
+}
+
+func (ms *memoryStorage) lastIndex() uint64 {
+	return ms.ents[0].Index + uint64(len(ms.ents)) - 1
+}
+
+func (ms *memoryStorage) LastIndex() (uint64, error)  {
+	ms.Mutex.Lock()
+	defer ms.Mutex.Unlock()
+	return ms.lastIndex(), nil
+}
+
+func (ms *memoryStorage) FirstIndex() (uint64, error)  {
+	return 0, nil
+}
+
+func (ms *memoryStorage) firstIndex() (uint64, error) {
+	ms.Mutex.Lock()
+	defer ms.Mutex.Unlock()
+	return ms.ents[0].Index + 1, nil
 }
 
 // Append the new entries to storage.
