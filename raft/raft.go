@@ -106,6 +106,33 @@ type raft struct {
 func (r *raft) Step(m pb.Message) error {
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
+	} else if m.Term < r.Term {
+		// Actually it is ok to ignore this message if msg type is Vote
+		// raft vote requirement(section5.2): If votes received from majority of servers: become leader
+		// ignore action has the same effect as reject action
+		return nil
+	}
+
+	switch m.Type {
+	case pb.MsgHup:
+		// candidate received
+		if r.state == StateCandidate {
+			r.campaign()
+		}
+	case pb.MsgVote:
+		// all server received
+		if r.state != StateLeader {
+			reject := !r.raftLog.isUpdateTo(m.LogTerm, m.Index)
+			r.send(pb.Message{Type:pb.MsgVoteResp, From:r.id, To:m.From, Reject:reject})
+		}
+	case pb.MsgVoteResp:
+		// candidates received
+		if r.state == StateCandidate {
+			r.votes[m.From] = !m.Reject
+			r.maybeGranted()
+		}
+	default:
+
 	}
 	return nil
 }
@@ -190,33 +217,48 @@ func (r *raft) resetRandomizedElectionTimeout() {
 }
 
 func (r *raft) becomeFollower(term uint64, lead uint64) {
-	r.Term = term
+	r.reset(term)
 	r.lead = lead
-
 	r.state = StateFollower
 	r.Vote = None
-	r.electionElapsed = 0
-	r.resetRandomizedElectionTimeout()
 
 }
 
 func (r *raft) becomeCandidate() {
-	r.Term += 1
 	r.state = StateCandidate
 	r.Vote = r.id
-	r.electionElapsed = 0
-	r.resetRandomizedElectionTimeout()
-
+	r.reset(r.Term + 1)
+	r.Step(pb.Message{Type:pb.MsgHup})
 }
 
 func (r *raft) becomeLeader() {
+	r.reset(r.Term)
 	r.state = StateLeader
 	r.Vote = None
+}
+
+func (r *raft) reset(term uint64) {
+	if r.Term != term {
+		r.Term = term
+	}
+	r.electionElapsed = 0
+	r.resetRandomizedElectionTimeout()
 	for _, pr := range r.prs {
 		pr.Match = 0
 		pr.Next = r.raftLog.lastIndex() + 1
 	}
+}
 
+func stepFollower(r *raft, m pb.Message) error {
+	return nil
+}
+
+func stepCandidate(r *raft, m pb.Message) error {
+	return nil
+}
+
+func stepLeader(r *raft, m pb.Message) error {
+	return nil
 }
 
 func (r *raft) appendEntry(es ...pb.Entry) {
@@ -226,6 +268,20 @@ func (r *raft) appendEntry(es ...pb.Entry) {
 		es[i].Index = lastIndex + 1 + uint64(i)
 	}
 	r.raftLog.append()
+
+}
+
+func (r *raft) campaign() {
+	// prepare args
+	// foreach MsgVote
+	for i := range r.prs {
+		// raft required candidate votes himself as the leader
+		r.send(pb.Message{From: r.id, To: i, Type: pb.MsgVote})
+	}
+}
+
+func (r *raft) send(m pb.Message) {
+	m.Term = r.Term
 
 }
 
@@ -242,9 +298,6 @@ func (r *raft) tickElection() {
 
 }
 
-func (r *raft) reset(term uint64) {
-
-}
 
 func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
@@ -304,5 +357,17 @@ func (r *raft) nodes() []uint64 {
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
+}
+
+func (r *raft) maybeGranted() {
+	grantCount := 0
+	for peer := range r.votes {
+		if r.votes[peer] {
+			grantCount += 1
+		}
+	}
+	if grantCount >= len(r.votes)/2 + 1 {
+		r.becomeLeader()
+	}
 }
 

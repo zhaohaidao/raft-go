@@ -50,6 +50,16 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 	return l.lastIndex()
 }
 
+func (l *raftLog) isUpdateTo(lastLogTerm uint64, lastLogIndex uint64) bool {
+	if lastLogTerm < l.lastTerm() {
+		return false
+	} else if lastLogTerm > l.lastTerm() {
+		return true
+	} else {
+		return lastLogIndex >= l.lastIndex()
+	}
+}
+
 func (l *raftLog) appliedTo(i uint64) {
 }
 
