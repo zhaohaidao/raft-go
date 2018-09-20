@@ -105,24 +105,33 @@ type raft struct {
 // TODO: leader election
 func (r *raft) Step(m pb.Message) error {
 	if m.Term > r.Term {
-		r.becomeFollower(m.Term, None)
-	} else if m.Term < r.Term {
-		// Actually it is ok to ignore this message if msg type is Vote
-		// raft vote requirement(section5.2): If votes received from majority of servers: become leader
-		// ignore action has the same effect as reject action
-		return nil
+		if r.state != StateFollower {
+			r.becomeFollower(m.Term, None)
+		}
 	}
+	//else if m.Term < r.Term {
+	//	// Actually it is ok to ignore this message if msg type is Vote
+	//	// raft vote requirement(section5.2): If votes received from majority of servers: become leader
+	//	// ignore action has the same effect as reject action
+	//	return nil
+	//}
 
 	switch m.Type {
 	case pb.MsgHup:
 		// candidate received
-		if r.state == StateCandidate {
+		if r.state == StateFollower {
 			r.campaign()
+			r.maybeGranted()
 		}
 	case pb.MsgVote:
 		// all server received
 		if r.state != StateLeader {
-			reject := !r.raftLog.isUpdateTo(m.LogTerm, m.Index)
+			reject := true
+			if r.Vote == 0 {
+				reject = !r.raftLog.isUpdateTo(m.LogTerm, m.Index)
+			} else {
+				reject = r.Vote != m.From
+			}
 			r.send(pb.Message{Type:pb.MsgVoteResp, From:r.id, To:m.From, Reject:reject})
 		}
 	case pb.MsgVoteResp:
@@ -130,6 +139,10 @@ func (r *raft) Step(m pb.Message) error {
 		if r.state == StateCandidate {
 			r.votes[m.From] = !m.Reject
 			r.maybeGranted()
+		}
+	case pb.MsgApp:
+		if r.state == StateCandidate {
+			r.becomeFollower(m.Term, m.From)
 		}
 	default:
 
@@ -147,6 +160,9 @@ func (r *raft) hardState() pb.HardState {
 	}
 }
 func (r *raft) loadState(state pb.HardState) {
+	r.Term = state.Term
+	r.Vote = state.Vote
+	r.raftLog.committed = state.Commit
 }
 
 // Config contains the parameters to start a raft.
@@ -228,7 +244,7 @@ func (r *raft) becomeCandidate() {
 	r.state = StateCandidate
 	r.Vote = r.id
 	r.reset(r.Term + 1)
-	r.Step(pb.Message{Type:pb.MsgHup})
+	r.votes[r.id] = true
 }
 
 func (r *raft) becomeLeader() {
@@ -243,6 +259,9 @@ func (r *raft) reset(term uint64) {
 	}
 	r.electionElapsed = 0
 	r.resetRandomizedElectionTimeout()
+	for id := range r.votes {
+		delete(r.votes, id)
+	}
 	for _, pr := range r.prs {
 		pr.Match = 0
 		pr.Next = r.raftLog.lastIndex() + 1
@@ -274,15 +293,18 @@ func (r *raft) appendEntry(es ...pb.Entry) {
 func (r *raft) campaign() {
 	// prepare args
 	// foreach MsgVote
+	r.becomeCandidate()
 	for i := range r.prs {
 		// raft required candidate votes himself as the leader
-		r.send(pb.Message{From: r.id, To: i, Type: pb.MsgVote})
+		if r.id != i {
+			r.send(pb.Message{From: r.id, To: i, Type: pb.MsgVote})
+		}
 	}
 }
 
 func (r *raft) send(m pb.Message) {
 	m.Term = r.Term
-
+	r.msgs = append(r.msgs, m)
 }
 
 // tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
@@ -331,6 +353,7 @@ func newRaft(c *Config) *raft {
 	for _, p := range peers {
 		r.prs[p] = &Progress{Next: 1}
 	}
+	r.votes = map[uint64]bool{}
 
 	if !isHardStateEqual(hs, emptyState) {
 		r.loadState(hs)
@@ -351,7 +374,11 @@ func newRaft(c *Config) *raft {
 }
 
 func (r *raft) nodes() []uint64 {
-	return []uint64{}
+	var nodes []uint64
+	for p := range r.prs {
+		nodes = append(nodes, p)
+	}
+	return nodes
 }
 
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
@@ -366,7 +393,7 @@ func (r *raft) maybeGranted() {
 			grantCount += 1
 		}
 	}
-	if grantCount >= len(r.votes)/2 + 1 {
+	if grantCount >= len(r.prs)/2 + 1 {
 		r.becomeLeader()
 	}
 }

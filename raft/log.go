@@ -72,7 +72,11 @@ func (l *raftLog) lastIndex() uint64 {
 }
 
 func (l *raftLog) lastTerm() uint64 {
-	return 0
+	term, err := l.storage.Term(l.lastIndex())
+	if err != nil {
+		panic(err) // TODO(bdarnell)
+	}
+	return term
 }
 
 // nextEnts returns all the available entries for execution.
