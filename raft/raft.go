@@ -1,13 +1,13 @@
 package raft
 
 import (
-	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
-	"fmt"
-	"strings"
 	"errors"
+	"fmt"
+	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
 	"math/rand"
-	"time"
+	"strings"
 	"sync"
+	"time"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -119,7 +119,7 @@ func (r *raft) Step(m pb.Message) error {
 	switch m.Type {
 	case pb.MsgHup:
 		// candidate received
-		if r.state == StateFollower {
+		if r.state != StateLeader {
 			r.campaign()
 			r.maybeGranted()
 		}
@@ -127,7 +127,7 @@ func (r *raft) Step(m pb.Message) error {
 		// all server received
 		if r.state != StateLeader {
 			reject := true
-			if r.Vote == 0 {
+			if r.Vote == None {
 				reject = !r.raftLog.isUpdateTo(m.LogTerm, m.Index)
 			} else {
 				reject = r.Vote != m.From
@@ -233,24 +233,26 @@ func (r *raft) resetRandomizedElectionTimeout() {
 }
 
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	r.state = StateFollower
 	r.reset(term)
 	r.lead = lead
-	r.state = StateFollower
 	r.Vote = None
-
+	r.tick = r.tickElection
 }
 
 func (r *raft) becomeCandidate() {
 	r.state = StateCandidate
-	r.Vote = r.id
 	r.reset(r.Term + 1)
+	r.Vote = r.id
 	r.votes[r.id] = true
+	r.tick = r.tickElection
 }
 
 func (r *raft) becomeLeader() {
-	r.reset(r.Term)
 	r.state = StateLeader
+	r.reset(r.Term)
 	r.Vote = None
+	r.tick = r.tickHeartbeat
 }
 
 func (r *raft) reset(term uint64) {
@@ -262,9 +264,11 @@ func (r *raft) reset(term uint64) {
 	for id := range r.votes {
 		delete(r.votes, id)
 	}
-	for _, pr := range r.prs {
-		pr.Match = 0
-		pr.Next = r.raftLog.lastIndex() + 1
+	if r.state == StateLeader {
+		for _, pr := range r.prs {
+			pr.Match = 0
+			pr.Next = r.raftLog.lastIndex() + 1
+		}
 	}
 }
 
@@ -317,7 +321,14 @@ func (r *raft) tickHeartbeat() {
 
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
+	if r.state == StateLeader {
+		panic("tickElection should never happen when it is the leader")
+	}
+	r.electionElapsed += 1
 
+	if r.electionElapsed > r.randomizedElectionTimeout {
+		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
+	}
 }
 
 
