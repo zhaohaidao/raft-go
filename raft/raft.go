@@ -140,10 +140,27 @@ func (r *raft) Step(m pb.Message) error {
 			r.votes[m.From] = !m.Reject
 			r.maybeGranted()
 		}
+	case pb.MsgProp:
+		if r.state == StateLeader {
+
+		}
 	case pb.MsgApp:
 		if r.state == StateCandidate {
 			r.becomeFollower(m.Term, m.From)
 		}
+	case pb.MsgAppResp:
+		if r.state == StateLeader {
+			if m.Index >= r.raftLog.committed {
+				if m.Reject {
+					r.prs[m.From].Next -= 1
+				} else {
+					r.prs[m.From].Next = m.Index + 1
+					r.prs[m.From].Next = m.Index
+					r.maybeCommitted(m.Index, m.Term)
+				}
+			}
+		}
+
 	default:
 
 	}
@@ -253,6 +270,11 @@ func (r *raft) becomeLeader() {
 	r.reset(r.Term)
 	r.Vote = None
 	r.tick = r.tickHeartbeat
+	r.appendEntry(pb.Entry{
+		Term:  r.Term,
+		Index: r.raftLog.lastIndex() + 1,
+		Data:  nil,
+	})
 }
 
 func (r *raft) reset(term uint64) {
@@ -290,7 +312,7 @@ func (r *raft) appendEntry(es ...pb.Entry) {
 		es[i].Term = r.Term
 		es[i].Index = lastIndex + 1 + uint64(i)
 	}
-	r.raftLog.append()
+	r.raftLog.append(es...)
 
 }
 
@@ -395,6 +417,30 @@ func (r *raft) nodes() []uint64 {
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
+	if r.state != StateLeader {
+		panic("bcastAppend should never happen when it is not leader")
+	}
+	// TODO: implement allEntries
+	entries := r.raftLog.allEntries()
+	for i, p := range r.prs {
+		if r.id != i {
+			prev := p.Next-1
+			prevTerm, err := r.raftLog.storage.Term(prev)
+			if err != nil {
+				panic("get log term failed")
+			}
+			r.send(pb.Message {
+				Type:    pb.MsgApp,
+				From:    r.id,
+				To:      i,
+				Term:    r.Term,
+				Index:   prev,
+				LogTerm: prevTerm,
+				Commit:  r.raftLog.committed,
+				Entries: entries[p.Next:],
+			})
+		}
+	}
 }
 
 func (r *raft) maybeGranted() {
@@ -406,6 +452,23 @@ func (r *raft) maybeGranted() {
 	}
 	if grantCount >= len(r.prs)/2 + 1 {
 		r.becomeLeader()
+		return
+	}
+}
+
+func (r *raft) maybeCommitted(index uint64, term uint64) {
+	successCount := 1
+	for i, p := range r.prs {
+		if r.id != i {
+			if p.Match >= index && r.Term == term {
+				successCount += 1
+			}
+			if successCount >= len(r.prs)/2 + 1 {
+				r.raftLog.committed = index
+				return
+			}
+		}
+
 	}
 }
 

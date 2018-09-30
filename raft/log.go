@@ -61,6 +61,10 @@ func (l *raftLog) isUpdateTo(lastLogTerm uint64, lastLogIndex uint64) bool {
 }
 
 func (l *raftLog) appliedTo(i uint64) {
+	if i > l.committed {
+		l.logger.Panicf("applied should never be less than committed", i, l.committed)
+	}
+	l.applied = i
 }
 
 func (l *raftLog) lastIndex() uint64 {
@@ -92,7 +96,7 @@ func (l *raftLog) allEntries() []pb.Entry {
 }
 
 func (l *raftLog) unstableEntries() []pb.Entry {
-	return []pb.Entry{}
+	return l.entries
 }
 
 func (l *raftLog) stableTo(i, t uint64) {
