@@ -142,7 +142,9 @@ func (r *raft) Step(m pb.Message) error {
 		}
 	case pb.MsgProp:
 		if r.state == StateLeader {
-
+			r.appendEntry(m.Entries...)
+			r.bcastAppend()
+			r.maybeCommitted(r.raftLog.lastIndex(), m.Term)
 		}
 	case pb.MsgApp:
 		if r.state == StateCandidate {
@@ -150,12 +152,12 @@ func (r *raft) Step(m pb.Message) error {
 		}
 	case pb.MsgAppResp:
 		if r.state == StateLeader {
-			if m.Index >= r.raftLog.committed {
-				if m.Reject {
-					r.prs[m.From].Next -= 1
-				} else {
+			if m.Reject {
+				r.prs[m.From].Next -= 1
+			} else {
+				if r.raftLog.lastIndex() >= r.prs[m.From].Next {
+					r.prs[m.From].Match = m.Index
 					r.prs[m.From].Next = m.Index + 1
-					r.prs[m.From].Next = m.Index
 					r.maybeCommitted(m.Index, m.Term)
 				}
 			}
@@ -420,24 +422,31 @@ func (r *raft) bcastAppend() {
 	if r.state != StateLeader {
 		panic("bcastAppend should never happen when it is not leader")
 	}
-	// TODO: implement allEntries
+
 	entries := r.raftLog.allEntries()
+	getEntries := func(next uint64) []pb.Entry {
+		for index := range entries {
+			if entries[index].Index == next {
+				return entries[index:]
+			}
+		}
+		return nil
+	}
+	// TODO: implement allEntries
+	commited := r.raftLog.committed
 	for i, p := range r.prs {
 		if r.id != i {
-			prev := p.Next-1
-			prevTerm, err := r.raftLog.storage.Term(prev)
-			if err != nil {
-				panic("get log term failed")
-			}
-			r.send(pb.Message {
+			prev := p.Next - 1
+			prevTerm := r.raftLog.term(prev)
+			r.send(pb.Message{
 				Type:    pb.MsgApp,
 				From:    r.id,
 				To:      i,
 				Term:    r.Term,
 				Index:   prev,
 				LogTerm: prevTerm,
-				Commit:  r.raftLog.committed,
-				Entries: entries[p.Next:],
+				Commit:  commited,
+				Entries: getEntries(p.Next),
 			})
 		}
 	}
@@ -463,10 +472,10 @@ func (r *raft) maybeCommitted(index uint64, term uint64) {
 			if p.Match >= index && r.Term == term {
 				successCount += 1
 			}
-			if successCount >= len(r.prs)/2 + 1 {
-				r.raftLog.committed = index
-				return
-			}
+		}
+		if successCount >= len(r.prs)/2 + 1 {
+			r.raftLog.committed = index
+			return
 		}
 
 	}

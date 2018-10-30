@@ -15,9 +15,9 @@
 package raft
 
 import (
+	"errors"
 	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
 	"sync"
-	"errors"
 )
 
 
@@ -129,12 +129,15 @@ func (ms *memoryStorage) LastIndex() (uint64, error)  {
 }
 
 func (ms *memoryStorage) FirstIndex() (uint64, error)  {
-	return 0, nil
+	return ms.firstIndex()
 }
 
 func (ms *memoryStorage) firstIndex() (uint64, error) {
 	ms.Mutex.Lock()
 	defer ms.Mutex.Unlock()
+	if len(ms.ents) == 1 {
+		return 0, ErrUnavailable
+	}
 	return ms.ents[0].Index + 1, nil
 }
 
@@ -142,6 +145,7 @@ func (ms *memoryStorage) firstIndex() (uint64, error) {
 // TODO (xiangli): ensure the entries are continuous and
 // entries[0].Index > ms.entries[0].Index
 func (ms *memoryStorage) Append(entries []pb.Entry) error {
+	ms.ents = append(ms.ents, entries...)
 	return nil
 }
 
