@@ -119,10 +119,22 @@ func (l *raftLog) nextEnts() (ents []pb.Entry) {
 	if lo >= l.entries[0].Index {
 		return l.slice(lo, hi)
 	} else {
-		// TODO: committed index is in unstable
-		ents, err := l.storage.Entries(l.applied+1, l.committed+1, math.MaxUint64)
+		last, err := l.storage.LastIndex()
 		if err != nil {
-			l.logger.Panicf("failed to get storage entires")
+			l.logger.Panicf("failed to get storage last index")
+		}
+		var ents []pb.Entry
+		if hi < last - 1 {
+			ents, err = l.storage.Entries(lo, hi, math.MaxUint64)
+			if err != nil {
+				l.logger.Panicf("failed to get storage entires")
+			}
+		} else {
+			ents, err = l.storage.Entries(lo, last + 1, math.MaxUint64)
+			if err != nil {
+				l.logger.Panicf("failed to get storage entires")
+			}
+			ents = append(ents, l.slice(last+1, hi)...)
 		}
 		return ents
 	}
