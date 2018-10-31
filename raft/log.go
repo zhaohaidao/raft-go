@@ -30,8 +30,9 @@ func newLog(storage Storage, logger Logger) *raftLog {
 		log.Panic("storage must not be nil")
 	}
 	log := &raftLog{
-		storage:    storage,
-		logger:     logger,
+		storage: storage,
+		logger:  logger,
+		entries: []pb.Entry{{Index: 0, Term: 0}},
 	}
 	return log
 }

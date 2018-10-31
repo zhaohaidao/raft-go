@@ -149,6 +149,19 @@ func (r *raft) Step(m pb.Message) error {
 	case pb.MsgApp:
 		if r.state == StateCandidate {
 			r.becomeFollower(m.Term, m.From)
+		} else if r.state == StateFollower {
+			reject := m.Term == r.raftLog.term(m.Index)
+			resp := pb.Message{Type: pb.MsgAppResp, From: r.id, To: m.From, Reject: reject}
+			if reject {
+				r.send(resp)
+				return nil
+			}
+			r.raftLog.append(m.Entries...)
+			resp.Index = m.Index + uint64(len(m.Entries))
+			if m.Commit > r.raftLog.committed {
+				r.raftLog.committed = min(m.Commit, r.raftLog.lastIndex())
+			}
+			r.send(resp)
 		}
 	case pb.MsgAppResp:
 		if r.state == StateLeader {
