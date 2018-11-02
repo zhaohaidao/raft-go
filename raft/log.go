@@ -32,7 +32,6 @@ func newLog(storage Storage, logger Logger) *raftLog {
 	log := &raftLog{
 		storage: storage,
 		logger:  logger,
-		entries: []pb.Entry{{Index: 0, Term: 0}},
 	}
 	return log
 }
@@ -41,14 +40,30 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 	if len(ents) == 0 {
 		return l.lastIndex()
 	}
-	after := ents[0].Index - 1
-	if after < l.committed {
-		l.logger.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
+	prev := ents[0].Index - 1
+	if prev < l.committed {
+		l.logger.Panicf("prev(%d) is out of range [committed(%d)]", prev, l.committed)
 	}
-	if l.lastIndex() > after {
-		l.entries = l.entries[0 : after + 1]
+	// setion 5.3
+	// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all
+	// that follow it
+	if l.lastIndex() > prev {
+		for i, entry := range ents {
+			term, err := l.term(entry.Index)
+			if err != nil {
+				panic(err)
+			}
+			if entry.Term != term {
+				if len(l.entries) > 0 {
+					l.entries = l.slice(l.entries[0].Index, entry.Index)
+				}
+				l.entries = append(l.entries, ents[i:]...)
+				break
+			}
+		}
+	} else {
+		l.entries = append(l.entries, ents...)
 	}
-	l.entries = append(l.entries, ents...)
 	return l.lastIndex()
 }
 
@@ -93,20 +108,16 @@ func (l *raftLog) lastTerm() uint64 {
 	return term
 }
 
-func (l *raftLog) term(i uint64) uint64 {
-	if i >= l.entries[0].Index {
+func (l *raftLog) term(i uint64) (uint64, error) {
+	if len(l.entries) == 0 || i < l.entries[0].Index {
+		return l.storage.Term(i)
+	} else {
 		for index := range l.entries {
 			if l.entries[index].Index == i {
-				return l.entries[index].Term
+				return l.entries[index].Term, nil
 			}
 		}
-		panic("Index not found")
-	} else {
-		t, err := l.storage.Term(i)
-		if err != nil {
-			panic(err)
-		}
-		return t
+		return 0, ErrUnavailable
 	}
 }
 
@@ -164,9 +175,15 @@ func (l *raftLog) allEntries() []pb.Entry {
 	} else if err != nil {
 		l.logger.Panicf("Get first index failed. err: %v", err)
 	}
-	hi, err := l.storage.LastIndex()
-	if err != nil {
-		l.logger.Panic("Get last index failed. err: %v", err)
+	var hi uint64
+	if len(l.entries) > 0 {
+		hi = l.entries[0].Index
+	} else {
+		lastIndex, err := l.storage.LastIndex()
+		if err != nil {
+			l.logger.Panic("Get last index failed. err: %v", err)
+		}
+		hi = lastIndex + 1
 	}
 	all, err := l.storage.Entries(lo, hi, math.MaxUint64)
 	if err != nil {

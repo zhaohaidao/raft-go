@@ -150,13 +150,32 @@ func (r *raft) Step(m pb.Message) error {
 		if r.state == StateCandidate {
 			r.becomeFollower(m.Term, m.From)
 		} else if r.state == StateFollower {
-			reject := m.Term == r.raftLog.term(m.Index)
+			term, err := r.raftLog.term(m.Index)
+			reject := err == ErrUnavailable || m.LogTerm != term
 			resp := pb.Message{Type: pb.MsgAppResp, From: r.id, To: m.From, Reject: reject}
 			if reject {
+				resp.RejectHint = r.raftLog.lastIndex()
+				resp.Index = m.Index
 				r.send(resp)
 				return nil
 			}
 			r.raftLog.append(m.Entries...)
+			// TODO: 弄清楚pb.Message里Index的意思
+			// MsgApp: prevLogIndex
+			// MsgAppResp: reject=false时，表示NextMatch；reject=true时呢？原样返回，无语
+			// MsgApp的resp里的Index应该表示最新的Match，为什么Index小于Committed时，要返回Committed？
+			// etcd-raft的handleAppendEntries里，有如下逻辑（raft论文未作解释）。
+			// 	if m.Index < r.raftLog.committed {
+			//		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
+			//		return
+			//	}
+			// 为了通过TestFollowerCheckMsgApp的测试，这里沿用etcd的逻辑
+			// 另外，为了保证case通过， 参考etcd，rejectHint会返回lastIndex
+			if m.Index < r.raftLog.committed {
+				resp.Index = r.raftLog.committed
+				r.send(resp)
+				return nil
+			}
 			resp.Index = m.Index + uint64(len(m.Entries))
 			if m.Commit > r.raftLog.committed {
 				r.raftLog.committed = min(m.Commit, r.raftLog.lastIndex())
@@ -168,7 +187,7 @@ func (r *raft) Step(m pb.Message) error {
 			if m.Reject {
 				r.prs[m.From].Next -= 1
 			} else {
-				if r.raftLog.lastIndex() >= r.prs[m.From].Next {
+				if m.Index > r.prs[m.From].Match && r.raftLog.lastIndex() >= r.prs[m.From].Next {
 					r.prs[m.From].Match = m.Index
 					r.prs[m.From].Next = m.Index + 1
 					r.maybeCommitted(m.Index, m.Term)
@@ -450,7 +469,10 @@ func (r *raft) bcastAppend() {
 	for i, p := range r.prs {
 		if r.id != i {
 			prev := p.Next - 1
-			prevTerm := r.raftLog.term(prev)
+			prevTerm, err := r.raftLog.term(prev)
+			if err != nil {
+				r.logger.Panicf("term not found for prev index: %v", prev)
+			}
 			r.send(pb.Message{
 				Type:    pb.MsgApp,
 				From:    r.id,
