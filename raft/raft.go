@@ -105,9 +105,7 @@ type raft struct {
 // TODO: leader election
 func (r *raft) Step(m pb.Message) error {
 	if m.Term > r.Term {
-		if r.state != StateFollower {
-			r.becomeFollower(m.Term, None)
-		}
+		r.becomeFollower(m.Term, None)
 	}
 	//else if m.Term < r.Term {
 	//	// Actually it is ok to ignore this message if msg type is Vote
@@ -184,35 +182,49 @@ func (r *raft) Step(m pb.Message) error {
 			if m.Commit > r.raftLog.committed {
 				r.raftLog.committed = min(m.Commit, r.raftLog.lastIndex())
 			}
-			r.send(resp)
+			// leader keeps append entries until the follower's log is consistent with leader's
+			// this logic should be in send end
+			if r.raftLog.committed != m.Commit {
+				r.send(resp)
+			}
 		}
 	case pb.MsgAppResp:
 		if r.state == StateLeader {
-			if m.Reject {
-				r.prs[m.From].Next -= 1
-				next := r.prs[m.From].Next
-				prev := next - 1
-				prevTerm, err := r.raftLog.term(prev)
+			if !m.Reject {
+				term, err := r.raftLog.term(m.Index)
 				if err != nil {
-					r.logger.Panicf("term not found for prev index: %v", prev)
+					r.logger.Panicf("term not found for index: %v", m.Index)
 				}
-				r.send(pb.Message{
-					Type:    pb.MsgApp,
-					From:    r.id,
-					To:      m.From,
-					Term:    r.Term,
-					Index:   prev,
-					LogTerm: prevTerm,
-					Commit:  r.raftLog.committed,
-					Entries: r.entriesByNext(next),
-				})
-			} else {
-				if m.Index > r.prs[m.From].Match && r.raftLog.lastIndex() >= r.prs[m.From].Next {
+				// once an entry from the current term has been committed in this way, then all prior entries are
+				// committed indirectly
+				if term == r.Term &&
+					m.Index > r.prs[m.From].Match &&
+					r.raftLog.lastIndex() >= r.prs[m.From].Next {
+
 					r.prs[m.From].Match = m.Index
 					r.prs[m.From].Next = m.Index + 1
 					r.maybeCommitted(m.Index, m.Term)
 				}
+			} else {
+				r.prs[m.From].Next -= 1
 			}
+
+			next := r.prs[m.From].Next
+			prev := next - 1
+			prevTerm, err := r.raftLog.term(prev)
+			if err != nil {
+				r.logger.Panicf("term not found for prev index: %v", prev)
+			}
+			r.send(pb.Message{
+				Type:    pb.MsgApp,
+				From:    r.id,
+				To:      m.From,
+				Term:    r.Term,
+				Index:   prev,
+				LogTerm: prevTerm,
+				Commit:  r.raftLog.committed,
+				Entries: r.entriesByNext(next),
+			})
 		}
 
 	default:
