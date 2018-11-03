@@ -182,14 +182,11 @@ func (r *raft) Step(m pb.Message) error {
 			if m.Commit > r.raftLog.committed {
 				r.raftLog.committed = min(m.Commit, r.raftLog.lastIndex())
 			}
-			// leader keeps append entries until the follower's log is consistent with leader's
-			// this logic should be in send end
-			if r.raftLog.committed != m.Commit {
-				r.send(resp)
-			}
+			r.send(resp)
 		}
 	case pb.MsgAppResp:
 		if r.state == StateLeader {
+			// leader keeps append entries until the follower's log is consistent with leader's
 			if !m.Reject {
 				term, err := r.raftLog.term(m.Index)
 				if err != nil {
@@ -200,31 +197,31 @@ func (r *raft) Step(m pb.Message) error {
 				if term == r.Term &&
 					m.Index > r.prs[m.From].Match &&
 					r.raftLog.lastIndex() >= r.prs[m.From].Next {
-
 					r.prs[m.From].Match = m.Index
 					r.prs[m.From].Next = m.Index + 1
-					r.maybeCommitted(m.Index, m.Term)
+					if m.Index > r.raftLog.committed && r.maybeCommitted(m.Index, m.Term) {
+						r.bcastAppend()
+					}
 				}
 			} else {
 				r.prs[m.From].Next -= 1
+				next := r.prs[m.From].Next
+				prev := next - 1
+				prevTerm, err := r.raftLog.term(prev)
+				if err != nil {
+					r.logger.Panicf("term not found for prev index: %v", prev)
+				}
+				r.send(pb.Message{
+					Type:    pb.MsgApp,
+					From:    r.id,
+					To:      m.From,
+					Term:    r.Term,
+					Index:   prev,
+					LogTerm: prevTerm,
+					Commit:  r.raftLog.committed,
+					Entries: r.entriesByNext(next),
+				})
 			}
-
-			next := r.prs[m.From].Next
-			prev := next - 1
-			prevTerm, err := r.raftLog.term(prev)
-			if err != nil {
-				r.logger.Panicf("term not found for prev index: %v", prev)
-			}
-			r.send(pb.Message{
-				Type:    pb.MsgApp,
-				From:    r.id,
-				To:      m.From,
-				Term:    r.Term,
-				Index:   prev,
-				LogTerm: prevTerm,
-				Commit:  r.raftLog.committed,
-				Entries: r.entriesByNext(next),
-			})
 		}
 
 	default:
@@ -560,7 +557,7 @@ func (r *raft) maybeGranted() {
 	}
 }
 
-func (r *raft) maybeCommitted(index uint64, term uint64) {
+func (r *raft) maybeCommitted(index uint64, term uint64) bool {
 	successCount := 1
 	for i, p := range r.prs {
 		if r.id != i {
@@ -570,9 +567,9 @@ func (r *raft) maybeCommitted(index uint64, term uint64) {
 		}
 		if successCount >= len(r.prs)/2 + 1 {
 			r.raftLog.committed = index
-			return
+			return true
 		}
-
 	}
+	return false
 }
 
