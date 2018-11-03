@@ -3,6 +3,7 @@ package raft
 import (
 	pb "github.com/zhaohaidao/raft-go/raft/raftpb"
 	"fmt"
+	"math/rand"
 )
 
 func newTestRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage) *raft {
@@ -101,6 +102,39 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 }
 
 func (nw *network) send(msgs ...pb.Message) {
+	for len(msgs) > 0 {
+		m := msgs[0]
+		p := nw.peers[m.To]
+		p.Step(m)
+		resps := p.readMessages()
+		msgs = append(msgs[1:], nw.filter(resps)...)
+	}
+}
+
+func (nw *network) filter(msgs []pb.Message) []pb.Message {
+	mm := []pb.Message{}
+	for _, m := range msgs {
+		if nw.ignorem[m.Type] {
+			continue
+		}
+		switch m.Type {
+		case pb.MsgHup:
+			// hups never go over the network, so don't drop them but panic
+			panic("unexpected msgHup")
+		default:
+			perc := nw.dropm[connem{m.From, m.To}]
+			if n := rand.Float64(); n < perc {
+				continue
+			}
+		}
+		if nw.msgHook != nil {
+			if !nw.msgHook(m) {
+				continue
+			}
+		}
+		mm = append(mm, m)
+	}
+	return mm
 }
 
 type connem struct {

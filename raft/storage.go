@@ -145,6 +145,19 @@ func (ms *memoryStorage) firstIndex() (uint64, error) {
 // TODO (xiangli): ensure the entries are continuous and
 // entries[0].Index > ms.entries[0].Index
 func (ms *memoryStorage) Append(entries []pb.Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	if entries[0].Index < ms.ents[0].Index {
+		panic("should never happen")
+	}
+	startIndex := entries[0].Index
+	for i, entry := range ms.ents {
+		if entry.Index == startIndex {
+			ms.ents = ms.ents[0:i]
+			break
+		}
+	}
 	ms.ents = append(ms.ents, entries...)
 	return nil
 }

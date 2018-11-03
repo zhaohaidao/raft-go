@@ -140,6 +140,10 @@ func (r *raft) Step(m pb.Message) error {
 			r.votes[m.From] = !m.Reject
 			r.maybeGranted()
 		}
+	case pb.MsgBeat:
+		if r.state == StateLeader {
+			r.bcastHeartbeat()
+		}
 	case pb.MsgProp:
 		if r.state == StateLeader {
 			r.appendEntry(m.Entries...)
@@ -186,6 +190,22 @@ func (r *raft) Step(m pb.Message) error {
 		if r.state == StateLeader {
 			if m.Reject {
 				r.prs[m.From].Next -= 1
+				next := r.prs[m.From].Next
+				prev := next - 1
+				prevTerm, err := r.raftLog.term(prev)
+				if err != nil {
+					r.logger.Panicf("term not found for prev index: %v", prev)
+				}
+				r.send(pb.Message{
+					Type:    pb.MsgApp,
+					From:    r.id,
+					To:      m.From,
+					Term:    r.Term,
+					Index:   prev,
+					LogTerm: prevTerm,
+					Commit:  r.raftLog.committed,
+					Entries: r.entriesByNext(next),
+				})
 			} else {
 				if m.Index > r.prs[m.From].Match && r.raftLog.lastIndex() >= r.prs[m.From].Next {
 					r.prs[m.From].Match = m.Index
@@ -304,6 +324,12 @@ func (r *raft) becomeLeader() {
 	r.reset(r.Term)
 	r.Vote = None
 	r.tick = r.tickHeartbeat
+	// reset Next first or append no-op entry?
+	// why not initialize NextIndex to lastIndex directly?
+	for _, pr := range r.prs {
+		pr.Match = 0
+		pr.Next = r.raftLog.lastIndex() + 1
+	}
 	r.appendEntry(pb.Entry{
 		Term:  r.Term,
 		Index: r.raftLog.lastIndex() + 1,
@@ -319,12 +345,6 @@ func (r *raft) reset(term uint64) {
 	r.resetRandomizedElectionTimeout()
 	for id := range r.votes {
 		delete(r.votes, id)
-	}
-	if r.state == StateLeader {
-		for _, pr := range r.prs {
-			pr.Match = 0
-			pr.Next = r.raftLog.lastIndex() + 1
-		}
 	}
 }
 
@@ -354,10 +374,19 @@ func (r *raft) campaign() {
 	// prepare args
 	// foreach MsgVote
 	r.becomeCandidate()
+	lastTerm := r.raftLog.lastTerm()
+	lastIndex := r.raftLog.lastIndex()
 	for i := range r.prs {
 		// raft required candidate votes himself as the leader
 		if r.id != i {
-			r.send(pb.Message{From: r.id, To: i, Type: pb.MsgVote})
+			r.send(pb.Message{
+				Type:    pb.MsgVote,
+				To:      i,
+				From:    r.id,
+				Term:    r.Term,
+				LogTerm: lastTerm,
+				Index:   lastIndex,
+			})
 		}
 	}
 }
@@ -448,6 +477,34 @@ func (r *raft) nodes() []uint64 {
 	return nodes
 }
 
+func (r *raft) entriesByNext(next uint64) []pb.Entry {
+	entries := r.raftLog.allEntries()
+	for index := range entries {
+		if entries[index].Index == next {
+			return entries[index:]
+		}
+	}
+	return nil
+
+}
+
+func (r *raft) bcastHeartbeat() {
+	if r.state != StateLeader {
+		panic("bcastHeartbeat should never happen when it is not leader")
+	}
+
+	for i := range r.prs {
+		if r.id != i {
+			r.send(pb.Message{
+				Type:    pb.MsgHeartbeat,
+				From:    r.id,
+				To:      i,
+				Term:    r.Term,
+			})
+		}
+	}
+}
+
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
@@ -455,15 +512,6 @@ func (r *raft) bcastAppend() {
 		panic("bcastAppend should never happen when it is not leader")
 	}
 
-	entries := r.raftLog.allEntries()
-	getEntries := func(next uint64) []pb.Entry {
-		for index := range entries {
-			if entries[index].Index == next {
-				return entries[index:]
-			}
-		}
-		return nil
-	}
 	// TODO: implement allEntries
 	commited := r.raftLog.committed
 	for i, p := range r.prs {
@@ -481,7 +529,7 @@ func (r *raft) bcastAppend() {
 				Index:   prev,
 				LogTerm: prevTerm,
 				Commit:  commited,
-				Entries: getEntries(p.Next),
+				Entries: r.entriesByNext(p.Next),
 			})
 		}
 	}
