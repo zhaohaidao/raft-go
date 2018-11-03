@@ -411,7 +411,7 @@ func (r *raft) tickElection() {
 	}
 	r.electionElapsed += 1
 
-	if r.electionElapsed > r.randomizedElectionTimeout {
+	if r.electionElapsed >= r.randomizedElectionTimeout {
 		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
 	}
 }
